@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
 import { getDiffReviewFiles } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
@@ -9,8 +10,11 @@ function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPaylo
   return value.type === "submit";
 }
 
+type WaitingEditorResult = "escape" | "window-settled";
+
 export default function (pi: ExtensionAPI) {
   let activeWindow: GlimpseWindow | null = null;
+  let activeWaitingUIDismiss: (() => void) | null = null;
 
   function closeActiveWindow(): void {
     if (activeWindow == null) return;
@@ -19,6 +23,72 @@ export default function (pi: ExtensionAPI) {
     try {
       windowToClose.close();
     } catch {}
+  }
+
+  function showWaitingUI(ctx: ExtensionCommandContext): {
+    promise: Promise<WaitingEditorResult>;
+    dismiss: () => void;
+  } {
+    let settled = false;
+    let doneFn: ((result: WaitingEditorResult) => void) | null = null;
+    let pendingResult: WaitingEditorResult | null = null;
+
+    const finish = (result: WaitingEditorResult): void => {
+      if (settled) return;
+      settled = true;
+      if (activeWaitingUIDismiss === dismiss) {
+        activeWaitingUIDismiss = null;
+      }
+      if (doneFn != null) {
+        doneFn(result);
+      } else {
+        pendingResult = result;
+      }
+    };
+
+    const promise = ctx.ui.custom<WaitingEditorResult>((_tui, theme, _kb, done) => {
+      doneFn = done;
+      if (pendingResult != null) {
+        const result = pendingResult;
+        pendingResult = null;
+        queueMicrotask(() => done(result));
+      }
+
+      return {
+        render(width: number): string[] {
+          const innerWidth = Math.max(24, width - 2);
+          const borderTop = theme.fg("border", `╭${"─".repeat(innerWidth)}╮`);
+          const borderBottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
+          const lines = [
+            theme.fg("accent", theme.bold("Waiting for review")),
+            "The native diff review window is open.",
+            "Press Escape to cancel and close the review window.",
+          ];
+          return [
+            borderTop,
+            ...lines.map((line) => `${theme.fg("border", "│")}${truncateToWidth(line, innerWidth, "...", true).padEnd(innerWidth, " ")}${theme.fg("border", "│")}`),
+            borderBottom,
+          ];
+        },
+        handleInput(data: string): void {
+          if (matchesKey(data, Key.escape)) {
+            finish("escape");
+          }
+        },
+        invalidate(): void {},
+      };
+    });
+
+    const dismiss = (): void => {
+      finish("window-settled");
+    };
+
+    activeWaitingUIDismiss = dismiss;
+
+    return {
+      promise,
+      dismiss,
+    };
   }
 
   async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
@@ -41,10 +111,12 @@ export default function (pi: ExtensionAPI) {
     });
     activeWindow = window;
 
+    const waitingUI = showWaitingUI(ctx);
+
     ctx.ui.notify("Opened native diff review window.", "info");
 
     try {
-      const message = await new Promise<ReviewWindowMessage | null>((resolve, reject) => {
+      const windowMessagePromise = new Promise<ReviewWindowMessage | null>((resolve, reject) => {
         let settled = false;
 
         const cleanup = (): void => {
@@ -83,6 +155,22 @@ export default function (pi: ExtensionAPI) {
         window.on("error", onError);
       });
 
+      const result = await Promise.race([
+        windowMessagePromise.then((message) => ({ type: "window" as const, message })),
+        waitingUI.promise.then((reason) => ({ type: "ui" as const, reason })),
+      ]);
+
+      if (result.type === "ui" && result.reason === "escape") {
+        closeActiveWindow();
+        await windowMessagePromise.catch(() => null);
+        ctx.ui.notify("Diff review cancelled.", "info");
+        return;
+      }
+
+      const message = result.type === "window" ? result.message : await windowMessagePromise;
+
+      waitingUI.dismiss();
+      await waitingUI.promise;
       closeActiveWindow();
 
       if (message == null || message.type === "cancel") {
@@ -99,6 +187,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted diff review feedback into the editor.", "info");
     } catch (error) {
+      activeWaitingUIDismiss?.();
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Diff review failed: ${message}`, "error");
@@ -113,6 +202,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    activeWaitingUIDismiss?.();
     closeActiveWindow();
   });
 }
