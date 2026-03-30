@@ -475,12 +475,25 @@ function updateSidebarLayout() {
   toggleSidebarButton.textContent = collapsed ? "Show sidebar" : "Hide sidebar";
 }
 
-function toggleSidebar() {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
+function setSidebarCollapsed(collapsed) {
+  if (state.sidebarCollapsed === collapsed) return;
+  state.sidebarCollapsed = collapsed;
   updateSidebarLayout();
   requestAnimationFrame(() => {
     layoutEditor();
     setTimeout(layoutEditor, 50);
+  });
+}
+
+function toggleSidebar() {
+  setSidebarCollapsed(!state.sidebarCollapsed);
+}
+
+function focusFileSearch() {
+  setSidebarCollapsed(false);
+  requestAnimationFrame(() => {
+    sidebarSearchInputEl.focus();
+    sidebarSearchInputEl.select();
   });
 }
 
@@ -555,6 +568,15 @@ const shortcuts = [
     preventDefault: true,
     run: () => {
       toggleSidebar();
+    },
+  },
+  {
+    id: "focus-file-search",
+    combo: "Mod+K",
+    allowWhileTyping: true,
+    preventDefault: true,
+    run: () => {
+      focusFileSearch();
     },
   },
 ];
@@ -1196,9 +1218,14 @@ sidebarSearchInputEl.addEventListener("input", () => {
 
 sidebarSearchInputEl.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    sidebarSearchInputEl.value = "";
-    state.fileFilter = "";
-    renderTree();
+    event.preventDefault();
+    if (sidebarSearchInputEl.value.length > 0) {
+      sidebarSearchInputEl.value = "";
+      state.fileFilter = "";
+      renderTree();
+      return;
+    }
+    sidebarSearchInputEl.blur();
   }
 });
 
