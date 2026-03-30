@@ -255,6 +255,11 @@ function getFilteredFiles() {
     .map((entry) => entry.file);
 }
 
+function getSearchTargetFile(files = getFilteredFiles()) {
+  if (!state.fileFilter.trim() || files.length === 0) return null;
+  return files.find((file) => file.id === state.activeFileId) ?? files[0];
+}
+
 function buildTree(files) {
   const root = { name: "", path: "", kind: "dir", children: new Map(), file: null };
   for (const file of files) {
@@ -431,6 +436,10 @@ function renderTreeNode(node, depth) {
 }
 
 function renderSearchResults(files) {
+  const searchTargetFileId = document.activeElement === sidebarSearchInputEl
+    ? getSearchTargetFile(files)?.id ?? null
+    : state.activeFileId;
+
   files.forEach((file) => {
     const path = getFileSearchPath(file);
     const baseName = getBaseName(path);
@@ -441,19 +450,20 @@ function renderSearchResults(files) {
     const loading = requestState.requestId != null && requestState.contents == null;
     const errored = requestState.error != null;
     const status = getActiveStatus(file);
+    const isHighlighted = file.id === searchTargetFileId;
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
       "group flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left",
-      file.id === state.activeFileId ? "bg-[#373e47] text-white" : "text-[#c9d1d9] hover:bg-[#21262d]",
+      isHighlighted ? "bg-[#373e47] text-white" : "text-[#c9d1d9] hover:bg-[#21262d]",
     ].join(" ");
     button.innerHTML = `
       <span class="min-w-0 flex-1">
         <span class="flex items-center gap-1.5">
           <span class="shrink-0 text-[10px] ${reviewed ? "text-[#3fb950]" : errored ? "text-red-400" : loading ? "text-[#58a6ff]" : "text-transparent"}">${reviewed ? "●" : errored ? "!" : loading ? "…" : "●"}</span>
-          <span class="truncate text-[13px] ${file.id === state.activeFileId ? "font-medium" : ""}">${escapeHtml(baseName)}</span>
+          <span class="truncate text-[13px] ${isHighlighted ? "font-medium" : ""}">${escapeHtml(baseName)}</span>
         </span>
-        <span class="mt-0.5 block truncate pl-[14px] text-[11px] ${file.id === state.activeFileId ? "text-[#c9d1d9]" : "text-review-muted"}">${escapeHtml(parentPath || path)}</span>
+        <span class="mt-0.5 block truncate pl-[14px] text-[11px] ${isHighlighted ? "text-[#c9d1d9]" : "text-review-muted"}">${escapeHtml(parentPath || path)}</span>
       </span>
       <span class="flex shrink-0 items-center gap-1.5">
         ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
@@ -1217,6 +1227,15 @@ sidebarSearchInputEl.addEventListener("input", () => {
 });
 
 sidebarSearchInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    const file = getSearchTargetFile();
+    if (!file) return;
+    event.preventDefault();
+    openFile(file.id);
+    sidebarSearchInputEl.blur();
+    return;
+  }
+
   if (event.key === "Escape") {
     event.preventDefault();
     if (sidebarSearchInputEl.value.length > 0) {
