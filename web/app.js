@@ -507,6 +507,11 @@ function focusFileSearch() {
   });
 }
 
+function cancelReview() {
+  window.glimpse.send({ type: "cancel" });
+  window.glimpse.close();
+}
+
 function isTypingTarget(target) {
   return target instanceof HTMLInputElement
     || target instanceof HTMLTextAreaElement
@@ -587,6 +592,15 @@ const shortcuts = [
     preventDefault: true,
     run: () => {
       focusFileSearch();
+    },
+  },
+  {
+    id: "close-review-window",
+    combo: "Mod+W",
+    allowWhileTyping: true,
+    preventDefault: true,
+    run: () => {
+      cancelReview();
     },
   },
 ];
@@ -1169,8 +1183,7 @@ submitButton.addEventListener("click", () => {
 });
 
 cancelButton.addEventListener("click", () => {
-  window.glimpse.send({ type: "cancel" });
-  window.glimpse.close();
+  cancelReview();
 });
 
 overallCommentButton.addEventListener("click", () => {
