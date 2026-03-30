@@ -16,6 +16,7 @@ const state = {
   scrollPositions: {},
   sidebarCollapsed: false,
   fileFilter: "",
+  searchTargetFileId: null,
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
@@ -257,7 +258,28 @@ function getFilteredFiles() {
 
 function getSearchTargetFile(files = getFilteredFiles()) {
   if (!state.fileFilter.trim() || files.length === 0) return null;
-  return files.find((file) => file.id === state.activeFileId) ?? files[0];
+  return files.find((file) => file.id === state.searchTargetFileId)
+    ?? files.find((file) => file.id === state.activeFileId)
+    ?? files[0];
+}
+
+function moveSearchTarget(offset) {
+  const files = getFilteredFiles();
+  const target = getSearchTargetFile(files);
+  if (target == null) return;
+
+  const currentIndex = files.findIndex((file) => file.id === target.id);
+  if (currentIndex < 0) return;
+
+  const nextIndex = Math.max(0, Math.min(files.length - 1, currentIndex + offset));
+  const nextFile = files[nextIndex];
+  if (nextFile == null) return;
+
+  state.searchTargetFileId = nextFile.id;
+  renderTree();
+  requestAnimationFrame(() => {
+    fileTreeEl.querySelector('[data-search-target="true"]')?.scrollIntoView({ block: "nearest" });
+  });
 }
 
 function buildTree(files) {
@@ -436,9 +458,14 @@ function renderTreeNode(node, depth) {
 }
 
 function renderSearchResults(files) {
-  const searchTargetFileId = document.activeElement === sidebarSearchInputEl
+  const searchInputFocused = document.activeElement === sidebarSearchInputEl;
+  const searchTargetFileId = searchInputFocused
     ? getSearchTargetFile(files)?.id ?? null
     : state.activeFileId;
+
+  if (searchInputFocused) {
+    state.searchTargetFileId = searchTargetFileId;
+  }
 
   files.forEach((file) => {
     const path = getFileSearchPath(file);
@@ -453,9 +480,10 @@ function renderSearchResults(files) {
     const isHighlighted = file.id === searchTargetFileId;
     const button = document.createElement("button");
     button.type = "button";
+    button.dataset.searchTarget = String(isHighlighted);
     button.className = [
       "group flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left",
-      isHighlighted ? "bg-[#373e47] text-white" : "text-[#c9d1d9] hover:bg-[#21262d]",
+      isHighlighted ? "bg-[#373e47] text-white" : searchInputFocused ? "text-[#c9d1d9]" : "text-[#c9d1d9] hover:bg-[#21262d]",
     ].join(" ");
     button.innerHTML = `
       <span class="min-w-0 flex-1">
@@ -504,6 +532,7 @@ function focusFileSearch() {
   requestAnimationFrame(() => {
     sidebarSearchInputEl.focus();
     sidebarSearchInputEl.select();
+    renderTree();
   });
 }
 
@@ -1236,10 +1265,31 @@ toggleSidebarButton.addEventListener("click", () => {
 
 sidebarSearchInputEl.addEventListener("input", () => {
   state.fileFilter = sidebarSearchInputEl.value;
+  state.searchTargetFileId = null;
+  renderTree();
+});
+
+sidebarSearchInputEl.addEventListener("focus", () => {
+  renderTree();
+});
+
+sidebarSearchInputEl.addEventListener("blur", () => {
   renderTree();
 });
 
 sidebarSearchInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveSearchTarget(1);
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveSearchTarget(-1);
+    return;
+  }
+
   if (event.key === "Enter") {
     const file = getSearchTargetFile();
     if (!file) return;
@@ -1254,6 +1304,7 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
     if (sidebarSearchInputEl.value.length > 0) {
       sidebarSearchInputEl.value = "";
       state.fileFilter = "";
+      state.searchTargetFileId = null;
       renderTree();
       return;
     }
