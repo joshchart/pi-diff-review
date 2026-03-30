@@ -475,6 +475,110 @@ function updateSidebarLayout() {
   toggleSidebarButton.textContent = collapsed ? "Show sidebar" : "Hide sidebar";
 }
 
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  updateSidebarLayout();
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function isTypingTarget(target) {
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || target?.isContentEditable === true;
+}
+
+function normalizeShortcutKey(key) {
+  if (typeof key !== "string") return "";
+  if (key === " ") return "space";
+  return key.length === 1 ? key.toLowerCase() : key.toLowerCase();
+}
+
+function matchesShortcut(event, combo) {
+  const parts = combo.split("+").map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+
+  const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+  let expectsMod = false;
+  let expectsMeta = false;
+  let expectsCtrl = false;
+  let expectsShift = false;
+  let expectsAlt = false;
+  let expectedKey = "";
+
+  parts.forEach((part) => {
+    switch (part.toLowerCase()) {
+      case "mod":
+        expectsMod = true;
+        break;
+      case "meta":
+      case "cmd":
+      case "command":
+        expectsMeta = true;
+        break;
+      case "ctrl":
+      case "control":
+        expectsCtrl = true;
+        break;
+      case "shift":
+        expectsShift = true;
+        break;
+      case "alt":
+      case "option":
+        expectsAlt = true;
+        break;
+      default:
+        expectedKey = normalizeShortcutKey(part);
+        break;
+    }
+  });
+
+  const wantsMeta = expectsMeta || (expectsMod && isMac);
+  const wantsCtrl = expectsCtrl || (expectsMod && !isMac);
+
+  if (event.metaKey !== wantsMeta) return false;
+  if (event.ctrlKey !== wantsCtrl) return false;
+  if (event.shiftKey !== expectsShift) return false;
+  if (event.altKey !== expectsAlt) return false;
+
+  return normalizeShortcutKey(event.key) === expectedKey;
+}
+
+const shortcuts = [
+  {
+    id: "toggle-sidebar",
+    combo: "Mod+S",
+    allowWhileTyping: true,
+    preventDefault: true,
+    run: () => {
+      toggleSidebar();
+    },
+  },
+];
+
+function handleGlobalShortcut(event) {
+  if (event.repeat) return;
+
+  const shortcut = shortcuts.find((entry) => {
+    if (!entry.allowWhileTyping && isTypingTarget(event.target)) return false;
+    return matchesShortcut(event, entry.combo);
+  });
+
+  if (!shortcut) return;
+  if (shortcut.preventDefault) {
+    event.preventDefault();
+  }
+  shortcut.run();
+}
+
+function activeFileShowsDiff() {
+  const file = activeFile();
+  return file != null && file.status != null;
+}
+
 function updateScopeButtons() {
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
@@ -1082,12 +1186,7 @@ scopeAllButton.addEventListener("click", () => {
 });
 
 toggleSidebarButton.addEventListener("click", () => {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
-  updateSidebarLayout();
-  requestAnimationFrame(() => {
-    layoutEditor();
-    setTimeout(layoutEditor, 50);
-  });
+  toggleSidebar();
 });
 
 sidebarSearchInputEl.addEventListener("input", () => {
@@ -1102,6 +1201,8 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
     renderTree();
   }
 });
+
+document.addEventListener("keydown", handleGlobalShortcut, true);
 
 ensureActiveFileForScope();
 renderTree();
