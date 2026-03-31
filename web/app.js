@@ -579,6 +579,43 @@ function normalizeDraftText(value) {
   return String(value ?? "").trim();
 }
 
+function createDiscardConfirmation(options) {
+  let discardConfirmationTimeout = null;
+  let discardArmed = false;
+
+  const clear = () => {
+    if (discardConfirmationTimeout != null) {
+      window.clearTimeout(discardConfirmationTimeout);
+      discardConfirmationTimeout = null;
+    }
+    discardArmed = false;
+    options.warningEl.classList.add("hidden");
+  };
+
+  const dismiss = () => {
+    clear();
+    options.onDismiss();
+  };
+
+  const attempt = () => {
+    if (!options.shouldConfirm()) {
+      dismiss();
+      return;
+    }
+
+    if (discardArmed) {
+      dismiss();
+      return;
+    }
+
+    discardArmed = true;
+    options.warningEl.classList.remove("hidden");
+    discardConfirmationTimeout = window.setTimeout(clear, modalDiscardConfirmTimeoutMs);
+  };
+
+  return { clear, attempt };
+}
+
 function normalizeShortcutKey(key) {
   if (typeof key !== "string") return "";
   if (key === " ") return "space";
@@ -853,8 +890,6 @@ function renderTree() {
 function showTextModal(options) {
   const initialValue = options.initialValue ?? "";
   const initialNormalizedValue = normalizeDraftText(initialValue);
-  let discardConfirmationTimeout = null;
-  let discardArmed = false;
 
   const backdrop = document.createElement("div");
   backdrop.className = "review-modal-backdrop";
@@ -877,36 +912,17 @@ function showTextModal(options) {
   const cancelButton = backdrop.querySelector("#review-modal-cancel");
   const saveButton = backdrop.querySelector("#review-modal-save");
 
-  const clearDiscardConfirmation = () => {
-    if (discardConfirmationTimeout != null) {
-      window.clearTimeout(discardConfirmationTimeout);
-      discardConfirmationTimeout = null;
-    }
-    discardArmed = false;
-    warningEl.classList.add("hidden");
-  };
+  const { clear: clearDiscardConfirmation, attempt: attemptDismiss } = createDiscardConfirmation({
+    warningEl,
+    shouldConfirm: () => normalizeDraftText(textarea.value) !== initialNormalizedValue,
+    onDismiss: () => {
+      backdrop.remove();
+    },
+  });
 
   const close = () => {
     clearDiscardConfirmation();
     backdrop.remove();
-  };
-
-  const isDirty = () => normalizeDraftText(textarea.value) !== initialNormalizedValue;
-
-  const attemptDismiss = () => {
-    if (!isDirty()) {
-      close();
-      return;
-    }
-
-    if (discardArmed) {
-      close();
-      return;
-    }
-
-    discardArmed = true;
-    warningEl.classList.remove("hidden");
-    discardConfirmationTimeout = window.setTimeout(clearDiscardConfirmation, modalDiscardConfirmTimeoutMs);
   };
 
   textarea.addEventListener("input", clearDiscardConfirmation);
@@ -1005,22 +1021,34 @@ function renderCommentDOM(comment, onDelete) {
       <button data-action="delete" class="cursor-pointer rounded-md border border-transparent bg-transparent px-2 py-1 text-xs font-medium text-review-muted hover:bg-red-500/10 hover:text-red-400">Delete</button>
     </div>
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
+    <div data-inline-dismiss-warning class="mt-2 hidden text-xs font-medium text-amber-300">Press Escape again within 1.5s to discard this inline comment.</div>
   `;
   const textarea = container.querySelector("textarea");
+  const warningEl = container.querySelector("[data-inline-dismiss-warning]");
+
+  const { clear: clearDiscardConfirmation, attempt: attemptDismiss } = createDiscardConfirmation({
+    warningEl,
+    shouldConfirm: () => normalizeDraftText(textarea.value).length > 0,
+    onDismiss: onDelete,
+  });
+
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
+    clearDiscardConfirmation();
   });
   textarea.addEventListener("keydown", (event) => {
     if (comment.side === "file") return;
     if (normalizeShortcutKey(event.key) !== "escape") return;
-    if (normalizeDraftText(textarea.value).length > 0) return;
 
     event.preventDefault();
     event.stopPropagation();
+    attemptDismiss();
+  });
+  container.querySelector("[data-action='delete']").addEventListener("click", () => {
+    clearDiscardConfirmation();
     onDelete();
   });
-  container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
   return container;
 }
