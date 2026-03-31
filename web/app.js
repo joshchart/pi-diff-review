@@ -649,11 +649,6 @@ function handleGlobalShortcut(event) {
   shortcut.run();
 }
 
-function activeFileShowsDiff() {
-  const file = activeFile();
-  return file != null && file.status != null;
-}
-
 function updateScopeButtons() {
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
