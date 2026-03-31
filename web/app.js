@@ -66,6 +66,7 @@ let requestSequence = 0;
 
 const activeHunkHighlightDurationMs = 500;
 const shortcutSequenceTimeoutMs = 500;
+const modalDiscardConfirmTimeoutMs = 1500;
 
 function escapeHtml(value) {
   return String(value)
@@ -565,10 +566,23 @@ function isTypingTarget(target) {
     || target.isContentEditable === true;
 }
 
+function isButtonLikeTarget(target) {
+  return target instanceof Element
+    && target.closest("button, [role='button'], a[href], summary") != null;
+}
+
+function hasOpenModal() {
+  return document.querySelector(".review-modal-backdrop") != null;
+}
+
+function normalizeDraftText(value) {
+  return String(value ?? "").trim();
+}
+
 function normalizeShortcutKey(key) {
   if (typeof key !== "string") return "";
   if (key === " ") return "space";
-  return key.length === 1 ? key.toLowerCase() : key.toLowerCase();
+  return key.toLowerCase();
 }
 
 function matchesShortcut(event, combo) {
@@ -684,6 +698,15 @@ const shortcuts = [
     },
   },
   {
+    id: "comment-active-hunk",
+    combo: "Enter",
+    allowWhileTyping: false,
+    preventDefault: true,
+    run: () => {
+      openCommentForActiveHunk();
+    },
+  },
+  {
     id: "bottom-of-file",
     combo: "Shift+G",
     allowWhileTyping: false,
@@ -733,6 +756,8 @@ function handleGlobalShortcut(event) {
   });
 
   if (!shortcut) return;
+  if (shortcut.id === "comment-active-hunk" && isButtonLikeTarget(event.target)) return;
+
   clearPendingShortcutSequence();
   if (shortcut.preventDefault) {
     event.preventDefault();
@@ -826,13 +851,19 @@ function renderTree() {
 }
 
 function showTextModal(options) {
+  const initialValue = options.initialValue ?? "";
+  const initialNormalizedValue = normalizeDraftText(initialValue);
+  let discardConfirmationTimeout = null;
+  let discardArmed = false;
+
   const backdrop = document.createElement("div");
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
     <div class="review-modal-card">
       <div class="mb-2 text-base font-semibold text-white">${escapeHtml(options.title)}</div>
       <div class="mb-4 text-sm text-review-muted">${escapeHtml(options.description)}</div>
-      <textarea id="review-modal-text" class="scrollbar-thin min-h-48 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(options.initialValue ?? "")}</textarea>
+      <textarea id="review-modal-text" class="scrollbar-thin min-h-48 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(initialValue)}</textarea>
+      <div id="review-modal-discard-warning" class="mt-2 hidden text-xs font-medium text-amber-300">Dismiss again within 1.5s to discard changes.</div>
       <div class="mt-4 flex justify-end gap-2">
         <button id="review-modal-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-4 py-2 text-sm font-medium text-review-text hover:bg-[#21262d]">Cancel</button>
         <button id="review-modal-save" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#238636] px-4 py-2 text-sm font-medium text-white hover:bg-[#2ea043]">${escapeHtml(options.saveLabel ?? "Save")}</button>
@@ -840,15 +871,64 @@ function showTextModal(options) {
     </div>
   `;
   document.body.appendChild(backdrop);
+
   const textarea = backdrop.querySelector("#review-modal-text");
-  const close = () => backdrop.remove();
-  backdrop.querySelector("#review-modal-cancel").addEventListener("click", close);
-  backdrop.querySelector("#review-modal-save").addEventListener("click", () => {
+  const warningEl = backdrop.querySelector("#review-modal-discard-warning");
+  const cancelButton = backdrop.querySelector("#review-modal-cancel");
+  const saveButton = backdrop.querySelector("#review-modal-save");
+
+  const clearDiscardConfirmation = () => {
+    if (discardConfirmationTimeout != null) {
+      window.clearTimeout(discardConfirmationTimeout);
+      discardConfirmationTimeout = null;
+    }
+    discardArmed = false;
+    warningEl.classList.add("hidden");
+  };
+
+  const close = () => {
+    clearDiscardConfirmation();
+    backdrop.remove();
+  };
+
+  const isDirty = () => normalizeDraftText(textarea.value) !== initialNormalizedValue;
+
+  const attemptDismiss = () => {
+    if (!isDirty()) {
+      close();
+      return;
+    }
+
+    if (discardArmed) {
+      close();
+      return;
+    }
+
+    discardArmed = true;
+    warningEl.classList.remove("hidden");
+    discardConfirmationTimeout = window.setTimeout(clearDiscardConfirmation, modalDiscardConfirmTimeoutMs);
+  };
+
+  textarea.addEventListener("input", clearDiscardConfirmation);
+
+  backdrop.addEventListener("keydown", (event) => {
+    if (normalizeShortcutKey(event.key) !== "escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    attemptDismiss();
+  });
+
+  cancelButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    attemptDismiss();
+  });
+  saveButton.addEventListener("click", () => {
     options.onSave(textarea.value.trim());
     close();
   });
   backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) close();
+    if (event.target !== backdrop) return;
+    attemptDismiss();
   });
   textarea.focus();
 }
@@ -930,6 +1010,15 @@ function renderCommentDOM(comment, onDelete) {
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
+  });
+  textarea.addEventListener("keydown", (event) => {
+    if (comment.side === "file") return;
+    if (normalizeShortcutKey(event.key) !== "escape") return;
+    if (normalizeDraftText(textarea.value).length > 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    onDelete();
   });
   container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
@@ -1143,6 +1232,54 @@ function navigateDiffHunk(offset) {
   revealDiffHunk(hunks[nextIndex]);
 }
 
+// Returns the hunk currently selected by j/k navigation, if any.
+function getActiveDiffHunk() {
+  const hunks = getActiveDiffHunks();
+  if (hunks.length === 0) return null;
+  if (typeof state.activeHunkIndex !== "number") return null;
+  if (state.activeHunkIndex < 0 || state.activeHunkIndex >= hunks.length) return null;
+  return hunks[state.activeHunkIndex] ?? null;
+}
+
+// Creates a blank inline comment for a specific side/line and scrolls it into view.
+function openInlineCommentDraft(side, line) {
+  const file = activeFile();
+  if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
+
+  state.comments.push({
+    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    fileId: file.id,
+    scope: state.currentScope,
+    side,
+    startLine: line,
+    endLine: line,
+    body: "",
+  });
+  updateCommentsUI();
+
+  const editor = side === "modified" ? diffEditor?.getModifiedEditor() : diffEditor?.getOriginalEditor();
+  editor?.revealLineInCenter(line);
+}
+
+// Opens a blank comment on the currently selected hunk, preferring the modified side.
+function openCommentForActiveHunk() {
+  if (!scopeSupportsHunkNavigation()) return;
+  if (hasOpenModal()) return;
+  if (document.activeElement === sidebarSearchInputEl) return;
+
+  const hunk = getActiveDiffHunk();
+  if (hunk == null) return;
+
+  if (hunk.modifiedRange != null) {
+    openInlineCommentDraft("modified", hunk.modifiedRange.startLineNumber);
+    return;
+  }
+
+  if (hunk.originalRange != null) {
+    openInlineCommentDraft("original", hunk.originalRange.startLineNumber);
+  }
+}
+
 function syncViewZones() {
   clearViewZones();
   if (!diffEditor || !isActiveFileReady()) return;
@@ -1323,19 +1460,7 @@ function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
-    state.comments.push({
-      id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-      fileId: file.id,
-      scope: state.currentScope,
-      side,
-      startLine: line,
-      endLine: line,
-      body: "",
-    });
-    updateCommentsUI();
-    editor.revealLineInCenter(line);
+    openInlineCommentDraft(side, line);
   }
 
   editor.onMouseMove((event) => {
@@ -1370,7 +1495,7 @@ function createGlyphHoverActions(editor, side) {
     if (target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
       const line = target.position?.lineNumber;
       if (!line) return;
-      openDraftAtLine(line);
+      openInlineCommentDraft(side, line);
     }
   });
 }
