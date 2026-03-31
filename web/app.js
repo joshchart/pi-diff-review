@@ -744,11 +744,15 @@ const shortcuts = [
     },
   },
   {
-    id: "bottom-of-file",
+    id: "last-diff-hunk",
     combo: "Shift+G",
     allowWhileTyping: false,
     preventDefault: true,
     run: () => {
+      if (scopeSupportsHunkNavigation() && activeFileShowsDiff()) {
+        goToDiffHunkBoundary("last");
+        return;
+      }
       goToCurrentFileBoundary("bottom");
     },
   },
@@ -774,6 +778,10 @@ function handleGoToTopSequence(event) {
 
   if (pendingShortcutSequence === "g") {
     clearPendingShortcutSequence();
+    if (scopeSupportsHunkNavigation() && activeFileShowsDiff()) {
+      goToDiffHunkBoundary("first");
+      return true;
+    }
     goToCurrentFileBoundary("top");
     return true;
   }
@@ -1241,6 +1249,18 @@ function revealDiffHunk(hunk) {
   highlightDiffHunk(hunk);
 }
 
+function goToDiffHunkBoundary(boundary) {
+  if (!scopeSupportsHunkNavigation()) return false;
+
+  const hunks = getActiveDiffHunks();
+  if (hunks.length === 0) return false;
+
+  const targetIndex = boundary === "first" ? 0 : hunks.length - 1;
+  state.activeHunkIndex = targetIndex;
+  revealDiffHunk(hunks[targetIndex]);
+  return true;
+}
+
 function navigateDiffHunk(offset) {
   if (!scopeSupportsHunkNavigation()) return;
 
@@ -1260,7 +1280,7 @@ function navigateDiffHunk(offset) {
   revealDiffHunk(hunks[nextIndex]);
 }
 
-// Returns the hunk currently selected by j/k navigation, if any.
+// Returns the hunk currently selected by j/k/gg/G navigation, if any.
 function getActiveDiffHunk() {
   const hunks = getActiveDiffHunks();
   if (hunks.length === 0) return null;
