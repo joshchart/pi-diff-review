@@ -20,6 +20,7 @@ const state = {
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
+  activeHunkIndex: null,
 };
 
 const sidebarEl = document.getElementById("sidebar");
@@ -54,9 +55,17 @@ let originalModel = null;
 let modifiedModel = null;
 let originalDecorations = [];
 let modifiedDecorations = [];
+let activeHunkOriginalDecorations = [];
+let activeHunkModifiedDecorations = [];
+let activeHunkHighlightTimeout = null;
+let pendingShortcutSequence = "";
+let pendingShortcutSequenceTimeout = null;
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
+
+const activeHunkHighlightDurationMs = 500;
+const shortcutSequenceTimeoutMs = 500;
 
 function escapeHtml(value) {
   return String(value)
@@ -393,6 +402,7 @@ function openFile(fileId) {
     return;
   }
   saveCurrentScrollPosition();
+  resetActiveHunkNavigation();
   state.activeFileId = fileId;
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(fileId, state.currentScope);
@@ -542,10 +552,17 @@ function cancelReview() {
 }
 
 function isTypingTarget(target) {
+  if (!(target instanceof Element)) return false;
+
+  const isMonacoInputArea = (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement)
+    && target.classList.contains("inputarea")
+    && target.closest(".monaco-editor") != null;
+  if (isMonacoInputArea) return false;
+
   return target instanceof HTMLInputElement
     || target instanceof HTMLTextAreaElement
     || target instanceof HTMLSelectElement
-    || target?.isContentEditable === true;
+    || target.isContentEditable === true;
 }
 
 function normalizeShortcutKey(key) {
@@ -604,6 +621,22 @@ function matchesShortcut(event, combo) {
   return normalizeShortcutKey(event.key) === expectedKey;
 }
 
+function clearPendingShortcutSequence() {
+  if (pendingShortcutSequenceTimeout != null) {
+    window.clearTimeout(pendingShortcutSequenceTimeout);
+    pendingShortcutSequenceTimeout = null;
+  }
+  pendingShortcutSequence = "";
+}
+
+function armShortcutSequence(sequence) {
+  clearPendingShortcutSequence();
+  pendingShortcutSequence = sequence;
+  pendingShortcutSequenceTimeout = window.setTimeout(() => {
+    clearPendingShortcutSequence();
+  }, shortcutSequenceTimeoutMs);
+}
+
 const shortcuts = [
   {
     id: "toggle-sidebar",
@@ -632,17 +665,75 @@ const shortcuts = [
       cancelReview();
     },
   },
+  {
+    id: "next-diff-hunk",
+    combo: "j",
+    allowWhileTyping: false,
+    preventDefault: true,
+    run: () => {
+      navigateDiffHunk(1);
+    },
+  },
+  {
+    id: "previous-diff-hunk",
+    combo: "k",
+    allowWhileTyping: false,
+    preventDefault: true,
+    run: () => {
+      navigateDiffHunk(-1);
+    },
+  },
+  {
+    id: "bottom-of-file",
+    combo: "Shift+G",
+    allowWhileTyping: false,
+    preventDefault: true,
+    run: () => {
+      goToCurrentFileBoundary("bottom");
+    },
+  },
 ];
+
+function handleGoToTopSequence(event) {
+  if (isTypingTarget(event.target)) {
+    clearPendingShortcutSequence();
+    return false;
+  }
+
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    clearPendingShortcutSequence();
+    return false;
+  }
+
+  if (normalizeShortcutKey(event.key) !== "g") {
+    clearPendingShortcutSequence();
+    return false;
+  }
+
+  event.preventDefault();
+
+  if (pendingShortcutSequence === "g") {
+    clearPendingShortcutSequence();
+    goToCurrentFileBoundary("top");
+    return true;
+  }
+
+  armShortcutSequence("g");
+  return true;
+}
 
 function handleGlobalShortcut(event) {
   if (event.repeat) return;
+  if (handleGoToTopSequence(event)) return;
 
+  const typingTarget = isTypingTarget(event.target);
   const shortcut = shortcuts.find((entry) => {
-    if (!entry.allowWhileTyping && isTypingTarget(event.target)) return false;
+    if (!entry.allowWhileTyping && typingTarget) return false;
     return matchesShortcut(event, entry.combo);
   });
 
   if (!shortcut) return;
+  clearPendingShortcutSequence();
   if (shortcut.preventDefault) {
     event.preventDefault();
   }
@@ -861,6 +952,197 @@ function isActiveFileReady() {
   return requestState.contents != null && requestState.error == null;
 }
 
+function scopeSupportsHunkNavigation(scope = state.currentScope) {
+  return scope === "git-diff" || scope === "last-commit";
+}
+
+function clearActiveHunkHighlight() {
+  if (activeHunkHighlightTimeout != null) {
+    window.clearTimeout(activeHunkHighlightTimeout);
+    activeHunkHighlightTimeout = null;
+  }
+
+  if (!diffEditor) {
+    activeHunkOriginalDecorations = [];
+    activeHunkModifiedDecorations = [];
+    return;
+  }
+
+  activeHunkOriginalDecorations = diffEditor.getOriginalEditor().deltaDecorations(activeHunkOriginalDecorations, []);
+  activeHunkModifiedDecorations = diffEditor.getModifiedEditor().deltaDecorations(activeHunkModifiedDecorations, []);
+}
+
+function resetActiveHunkNavigation() {
+  state.activeHunkIndex = null;
+  clearActiveHunkHighlight();
+}
+
+function toEditorLineRange(startLineNumber, endLineNumber, lineCount) {
+  if (lineCount <= 0) return null;
+  if (startLineNumber <= 0 && endLineNumber <= 0) return null;
+
+  const safeStart = Math.min(lineCount, Math.max(1, startLineNumber > 0 ? startLineNumber : endLineNumber));
+  const safeEnd = Math.min(lineCount, Math.max(safeStart, endLineNumber > 0 ? endLineNumber : safeStart));
+
+  return {
+    startLineNumber: safeStart,
+    endLineNumber: safeEnd,
+  };
+}
+
+function getActiveDiffHunks() {
+  if (!diffEditor || !monacoApi) return [];
+  if (!scopeSupportsHunkNavigation()) return [];
+  if (!activeFileShowsDiff() || !isActiveFileReady()) return [];
+
+  if (typeof diffEditor.getLineChanges !== "function") return [];
+
+  const lineChanges = diffEditor.getLineChanges();
+  if (!Array.isArray(lineChanges) || lineChanges.length === 0) return [];
+
+  const originalLineCount = diffEditor.getOriginalEditor().getModel()?.getLineCount() ?? 0;
+  const modifiedLineCount = diffEditor.getModifiedEditor().getModel()?.getLineCount() ?? 0;
+
+  return lineChanges
+    .map((change) => ({
+      originalRange: toEditorLineRange(change.originalStartLineNumber, change.originalEndLineNumber, originalLineCount),
+      modifiedRange: toEditorLineRange(change.modifiedStartLineNumber, change.modifiedEndLineNumber, modifiedLineCount),
+    }))
+    .filter((hunk) => hunk.originalRange != null || hunk.modifiedRange != null);
+}
+
+function decorateActiveHunk(editor, decorations, range, className) {
+  if (!range) {
+    return editor.deltaDecorations(decorations, []);
+  }
+
+  return editor.deltaDecorations(decorations, [{
+    range: new monacoApi.Range(range.startLineNumber, 1, range.endLineNumber, 1),
+    options: {
+      isWholeLine: true,
+      className,
+    },
+  }]);
+}
+
+function highlightDiffHunk(hunk) {
+  if (!diffEditor || !monacoApi || !hunk) return;
+
+  clearActiveHunkHighlight();
+
+  activeHunkOriginalDecorations = decorateActiveHunk(
+    diffEditor.getOriginalEditor(),
+    activeHunkOriginalDecorations,
+    hunk.originalRange,
+    "review-active-hunk-original",
+  );
+  activeHunkModifiedDecorations = decorateActiveHunk(
+    diffEditor.getModifiedEditor(),
+    activeHunkModifiedDecorations,
+    hunk.modifiedRange,
+    "review-active-hunk-modified",
+  );
+
+  activeHunkHighlightTimeout = window.setTimeout(() => {
+    clearActiveHunkHighlight();
+  }, activeHunkHighlightDurationMs);
+}
+
+function getPreferredCurrentFileEditor() {
+  if (!diffEditor) return null;
+
+  const comparison = activeComparison();
+  if (comparison != null) {
+    if (comparison.hasModified) return diffEditor.getModifiedEditor();
+    if (comparison.hasOriginal) return diffEditor.getOriginalEditor();
+  }
+
+  return diffEditor.getModifiedEditor();
+}
+
+function getCurrentFileEditors() {
+  if (!diffEditor) return [];
+
+  const comparison = activeComparison();
+  if (comparison == null) {
+    return [diffEditor.getOriginalEditor(), diffEditor.getModifiedEditor()];
+  }
+
+  const editors = [];
+  if (comparison.hasOriginal) editors.push(diffEditor.getOriginalEditor());
+  if (comparison.hasModified) editors.push(diffEditor.getModifiedEditor());
+  return editors;
+}
+
+function goToCurrentFileBoundary(boundary) {
+  const file = activeFile();
+  if (!file || !diffEditor || !isActiveFileReady()) return;
+
+  const preferredEditor = getPreferredCurrentFileEditor();
+  const editors = getCurrentFileEditors();
+  if (!preferredEditor || editors.length === 0) return;
+
+  if (boundary === "top") {
+    editors.forEach((editor) => editor.setScrollTop(0));
+    if (typeof preferredEditor.revealLine === "function") {
+      preferredEditor.revealLine(1, monacoApi?.editor?.ScrollType?.Smooth);
+    }
+    return;
+  }
+
+  const lineCount = preferredEditor.getModel()?.getLineCount() ?? 0;
+  if (lineCount <= 0) return;
+
+  editors.forEach((editor) => editor.setScrollTop(editor.getScrollHeight()));
+  if (typeof preferredEditor.revealLine === "function") {
+    preferredEditor.revealLine(lineCount, monacoApi?.editor?.ScrollType?.Smooth);
+  }
+}
+
+function revealDiffHunk(hunk) {
+  if (!diffEditor || !monacoApi || !hunk) return;
+
+  const targetEditor = hunk.modifiedRange != null
+    ? diffEditor.getModifiedEditor()
+    : hunk.originalRange != null
+      ? diffEditor.getOriginalEditor()
+      : null;
+  const targetRange = hunk.modifiedRange ?? hunk.originalRange;
+
+  if (!targetEditor || !targetRange) return;
+
+  if (typeof targetEditor.revealLinesInCenter === "function") {
+    targetEditor.revealLinesInCenter(
+      targetRange.startLineNumber,
+      targetRange.endLineNumber,
+      monacoApi.editor.ScrollType.Smooth,
+    );
+  } else {
+    targetEditor.revealLineInCenter(targetRange.startLineNumber);
+  }
+
+  highlightDiffHunk(hunk);
+}
+
+function navigateDiffHunk(offset) {
+  if (!scopeSupportsHunkNavigation()) return;
+
+  const hunks = getActiveDiffHunks();
+  if (hunks.length === 0) return;
+
+  const currentIndex = typeof state.activeHunkIndex === "number" && state.activeHunkIndex >= 0 && state.activeHunkIndex < hunks.length
+    ? state.activeHunkIndex
+    : null;
+  const nextIndex = currentIndex == null
+    ? offset > 0 ? 0 : hunks.length - 1
+    : currentIndex + offset;
+
+  if (nextIndex < 0 || nextIndex >= hunks.length) return;
+
+  state.activeHunkIndex = nextIndex;
+  revealDiffHunk(hunks[nextIndex]);
+}
+
 function syncViewZones() {
   clearViewZones();
   if (!diffEditor || !isActiveFileReady()) return;
@@ -961,6 +1243,7 @@ function mountFile(options = {}) {
   if (!file) {
     currentFileLabelEl.textContent = "No file selected";
     clearViewZones();
+    clearActiveHunkHighlight();
     if (originalModel) originalModel.dispose();
     if (modifiedModel) modifiedModel.dispose();
     originalModel = monacoApi.editor.createModel("", "plaintext");
@@ -1105,6 +1388,7 @@ window.__reviewReceive = function (message) {
     delete state.pendingRequestIds[key];
     renderTree();
     if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+      resetActiveHunkNavigation();
       mountFile({ restoreFileScroll: true });
     }
     return;
@@ -1115,6 +1399,7 @@ window.__reviewReceive = function (message) {
     delete state.pendingRequestIds[key];
     renderTree();
     if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+      resetActiveHunkNavigation();
       mountFile({ preserveScroll: false });
     }
   }
@@ -1187,6 +1472,7 @@ function switchScope(scope) {
   };
   if (!hasScopeFiles[scope] || state.currentScope === scope) return;
   saveCurrentScrollPosition();
+  resetActiveHunkNavigation();
   state.currentScope = scope;
   renderAll({ restoreFileScroll: true });
   const file = activeFile();

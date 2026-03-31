@@ -107,6 +107,26 @@
     background: #58a6ff;
   }
 
+  .monaco-editor .review-active-hunk-original {
+    background: rgba(210, 153, 34, 0.22);
+    animation: review-active-hunk-flash 500ms ease-out;
+  }
+
+  .monaco-editor .review-active-hunk-modified {
+    background: rgba(88, 166, 255, 0.22);
+    animation: review-active-hunk-flash 500ms ease-out;
+  }
+
+  @keyframes review-active-hunk-flash {
+    0% {
+      box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.08);
+    }
+
+    100% {
+      box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0);
+    }
+  }
+
   .monaco-editor .review-glyph-plus {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='16' height='16'%3E%3Cpath fill='%23c9d1d9' d='M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.75.75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z'%3E%3C/path%3E%3C/svg%3E");
     background-repeat: no-repeat;
