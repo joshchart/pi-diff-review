@@ -17,12 +17,25 @@ Adds a `/diff-review` command to pi.
 The command:
 
 1. opens a native review window
-2. lets you switch between `git diff`, `last commit`, and `all files` scopes
+2. lets you switch between `git diff`, `last commit`, `PR diff`, and `all files` scopes
 3. shows a collapsible sidebar with fuzzy file search
 4. shows git status markers in the sidebar for changed files and untracked files
-5. lazy-loads file contents on demand as you switch files and scopes
-6. lets you draft comments on the original side, modified side, or whole file
-7. inserts the resulting feedback prompt into the pi editor when you submit
+5. supports stacked-PR review with full PR diff, per-commit patch review, and cumulative commit review against a base branch
+6. lazy-loads file contents on demand as you switch files and scopes
+7. lets you draft comments on the original side, modified side, or whole file
+8. inserts the resulting feedback prompt into the pi editor when you submit
+
+## Base branch selection
+
+`/diff-review` computes PR/base-branch scopes against a base ref.
+
+- Auto-detection fallback order: `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`
+- Explicit override (preferred when your repo uses a different integration branch):
+  - `/diff-review --base develop`
+  - `/diff-review --base-ref release/1.2`
+  - `/diff-review develop` (single positional ref)
+
+If you provide an explicit base ref and it cannot be resolved (or has no merge base with `HEAD`), the command fails with an error instead of silently falling back.
 
 ## Requirements
 

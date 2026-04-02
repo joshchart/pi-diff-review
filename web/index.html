@@ -171,7 +171,18 @@
       <div class="mb-3 flex flex-wrap items-center gap-2">
         <button id="scope-diff-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Git diff</button>
         <button id="scope-last-commit-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Last commit</button>
+        <button id="scope-base-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">PR diff</button>
         <button id="scope-all-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">All files</button>
+      </div>
+      <div id="base-branch-controls" class="mb-3 hidden rounded-md border border-review-border bg-[#11161d] p-2.5">
+        <div class="mb-2 text-[10px] font-semibold uppercase tracking-wider text-review-muted">Stack review</div>
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <button id="base-mode-full-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Full PR</button>
+          <button id="base-mode-patch-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Commit patch</button>
+          <button id="base-mode-cumulative-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Cumulative</button>
+        </div>
+        <label for="base-commit-select" id="base-commit-label" class="mb-1 block text-[10px] font-medium uppercase tracking-wider text-review-muted">Commit</label>
+        <select id="base-commit-select" class="w-full rounded-md border border-review-border bg-review-panel px-2.5 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></select>
       </div>
       <input id="sidebar-search-input" type="text" spellcheck="false" autocomplete="off" placeholder="Search files" class="w-full rounded-md border border-review-border bg-review-panel px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
     </div>

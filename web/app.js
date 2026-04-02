@@ -1,12 +1,36 @@
 const reviewData = JSON.parse(document.getElementById("diff-review-data").textContent || "{}");
+const baseBranchData = reviewData.baseBranch || null;
+
+function getBaseCommits() {
+  return Array.isArray(baseBranchData?.commits) ? baseBranchData.commits : [];
+}
+
+function getLatestBaseCommitId() {
+  const commits = getBaseCommits();
+  return commits.length > 0 ? commits[commits.length - 1].id : null;
+}
+
+function hasBaseBranchScopeData(file) {
+  if (file.inBaseBranch) return true;
+  return Object.values(file.commitComparisons || {}).some((comparison) => comparison?.patch != null || comparison?.cumulative != null);
+}
+
+function getBaseBranchScopeFiles() {
+  return reviewData.files.filter(hasBaseBranchScopeData);
+}
+
+function getInitialScope() {
+  if (reviewData.files.some((file) => file.inGitDiff)) return "git-diff";
+  if (reviewData.files.some((file) => file.inLastCommit)) return "last-commit";
+  if (getBaseBranchScopeFiles().length > 0) return "base-branch";
+  return "all-files";
+}
 
 const state = {
   activeFileId: null,
-  currentScope: reviewData.files.some((file) => file.inGitDiff)
-    ? "git-diff"
-    : reviewData.files.some((file) => file.inLastCommit)
-      ? "last-commit"
-      : "all-files",
+  currentScope: getInitialScope(),
+  baseMode: "full",
+  activeBaseCommitId: getLatestBaseCommitId(),
   comments: [],
   overallComment: "",
   hideUnchanged: false,
@@ -29,7 +53,14 @@ const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
 const scopeDiffButton = document.getElementById("scope-diff-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
+const scopeBaseButton = document.getElementById("scope-base-button");
 const scopeAllButton = document.getElementById("scope-all-button");
+const baseBranchControlsEl = document.getElementById("base-branch-controls");
+const baseModeFullButton = document.getElementById("base-mode-full-button");
+const baseModePatchButton = document.getElementById("base-mode-patch-button");
+const baseModeCumulativeButton = document.getElementById("base-mode-cumulative-button");
+const baseCommitLabelEl = document.getElementById("base-commit-label");
+const baseCommitSelectEl = document.getElementById("base-commit-select");
 const windowTitleEl = document.getElementById("window-title");
 const repoRootEl = document.getElementById("repo-root");
 const fileTreeEl = document.getElementById("file-tree");
@@ -68,6 +99,84 @@ const activeHunkHighlightDurationMs = 500;
 const shortcutSequenceTimeoutMs = 500;
 const modalDiscardConfirmTimeoutMs = 1500;
 
+function getBaseCommitById(commitId) {
+  if (!commitId) return null;
+  return getBaseCommits().find((commit) => commit.id === commitId) ?? null;
+}
+
+function ensureBaseCommitSelection() {
+  const commits = getBaseCommits();
+  if (commits.length === 0) {
+    state.activeBaseCommitId = null;
+    state.baseMode = "full";
+    return;
+  }
+  if (!state.activeBaseCommitId || !commits.some((commit) => commit.id === state.activeBaseCommitId)) {
+    state.activeBaseCommitId = commits[commits.length - 1].id;
+  }
+}
+
+function normalizeSelection(scope = state.currentScope, baseMode = null, commitId = null) {
+  if (scope !== "base-branch") {
+    return { scope, baseMode: null, commitId: null };
+  }
+
+  ensureBaseCommitSelection();
+  const resolvedBaseMode = baseMode || state.baseMode || "full";
+  if (resolvedBaseMode === "full") {
+    return { scope, baseMode: "full", commitId: null };
+  }
+
+  return {
+    scope,
+    baseMode: resolvedBaseMode,
+    commitId: commitId || state.activeBaseCommitId || getLatestBaseCommitId(),
+  };
+}
+
+function currentSelection() {
+  return normalizeSelection(state.currentScope, state.baseMode, state.activeBaseCommitId);
+}
+
+function selectionsMatch(left, right) {
+  return left.scope === right.scope
+    && (left.baseMode || null) === (right.baseMode || null)
+    && (left.commitId || null) === (right.commitId || null);
+}
+
+function getCurrentSelectionLabel(scope = state.currentScope, baseMode = null, commitId = null) {
+  const selection = normalizeSelection(scope, baseMode, commitId);
+  if (selection.scope !== "base-branch") return scopeLabel(selection.scope);
+
+  if (selection.baseMode === "full") {
+    return `PR diff vs ${baseBranchData?.baseRef || "base branch"}`;
+  }
+
+  const commit = getBaseCommitById(selection.commitId);
+  const commitLabel = commit ? `${commit.shortId} ${commit.title}` : "selected commit";
+  return selection.baseMode === "patch"
+    ? `Commit patch • ${commitLabel}`
+    : `Cumulative • ${commitLabel}`;
+}
+
+function commentMatchesSelection(comment, scope = state.currentScope, baseMode = null, commitId = null) {
+  return selectionsMatch(
+    normalizeSelection(comment.scope, comment.baseMode || null, comment.commitId || null),
+    normalizeSelection(scope, baseMode, commitId),
+  );
+}
+
+function getCommentContext(scope = state.currentScope, baseMode = null, commitId = null) {
+  const selection = normalizeSelection(scope, baseMode, commitId);
+  return {
+    scope: selection.scope,
+    baseMode: selection.baseMode,
+    commitId: selection.commitId,
+  };
+}
+
+ensureBaseCommitSelection();
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -99,6 +208,7 @@ function scopeLabel(scope) {
   switch (scope) {
     case "git-diff": return "Git diff";
     case "last-commit": return "Last commit";
+    case "base-branch": return "PR diff";
     default: return "All files";
   }
 }
@@ -109,6 +219,17 @@ function scopeHint(scope) {
       return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
     case "last-commit":
       return "Review the last commit against its parent. Hover or click line numbers in the gutter to add an inline comment.";
+    case "base-branch": {
+      const selection = currentSelection();
+      if (selection.baseMode === "full") {
+        return `Review the full stacked diff from ${baseBranchData?.baseRef || "the base branch"} to HEAD. Hover or click line numbers in the gutter to add an inline comment.`;
+      }
+      const commit = getBaseCommitById(selection.commitId);
+      const commitLabel = commit ? `${commit.shortId} ${commit.title}` : "the selected commit";
+      return selection.baseMode === "patch"
+        ? `Review only the selected commit patch (${commitLabel}). Hover or click line numbers in the gutter to add an inline comment.`
+        : `Review cumulative changes from ${baseBranchData?.baseRef || "the base branch"} through ${commitLabel}. Hover or click line numbers in the gutter to add an inline comment.`;
+    }
     default:
       return "Review the current working tree snapshot. Hover or click line numbers in the gutter to add a code review comment.";
   }
@@ -132,12 +253,30 @@ function isFileReviewed(fileId) {
   return state.reviewedFiles[fileId] === true;
 }
 
-function getScopedFiles() {
-  switch (state.currentScope) {
+function getBaseBranchComparison(file, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  if (!file) return null;
+  const selection = normalizeSelection("base-branch", baseMode, commitId);
+  if (selection.baseMode === "full") return file.baseBranch;
+  if (!selection.commitId) return null;
+  const commitComparisons = file.commitComparisons?.[selection.commitId];
+  if (!commitComparisons) return null;
+  return selection.baseMode === "patch" ? commitComparisons.patch : commitComparisons.cumulative;
+}
+
+function getScopedFiles(scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  switch (scope) {
     case "git-diff":
       return reviewData.files.filter((file) => file.inGitDiff);
     case "last-commit":
       return reviewData.files.filter((file) => file.inLastCommit);
+    case "base-branch": {
+      const selection = normalizeSelection(scope, baseMode, commitId);
+      if (selection.baseMode === "full") {
+        return reviewData.files.filter((file) => file.inBaseBranch);
+      }
+      if (!selection.commitId) return [];
+      return reviewData.files.filter((file) => getBaseBranchComparison(file, selection.baseMode, selection.commitId) != null);
+    }
     default:
       return reviewData.files.filter((file) => file.hasWorkingTreeFile);
   }
@@ -159,33 +298,34 @@ function activeFile() {
   return reviewData.files.find((file) => file.id === state.activeFileId) ?? null;
 }
 
-function getScopeComparison(file, scope = state.currentScope) {
+function getScopeComparison(file, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
   if (!file) return null;
   if (scope === "git-diff") return file.gitDiff;
   if (scope === "last-commit") return file.lastCommit;
+  if (scope === "base-branch") return getBaseBranchComparison(file, baseMode, commitId);
   return null;
 }
 
 function activeComparison() {
-  return getScopeComparison(activeFile(), state.currentScope);
+  return getScopeComparison(activeFile(), state.currentScope, state.baseMode, state.activeBaseCommitId);
 }
 
 function activeFileShowsDiff() {
   return activeComparison() != null;
 }
 
-function getScopeFilePath(file) {
-  const comparison = getScopeComparison(file, state.currentScope);
+function getScopeFilePath(file, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  const comparison = getScopeComparison(file, scope, baseMode, commitId);
   return comparison?.newPath || comparison?.oldPath || file?.path || "";
 }
 
-function getScopeDisplayPath(file, scope = state.currentScope) {
-  const comparison = getScopeComparison(file, scope);
+function getScopeDisplayPath(file, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  const comparison = getScopeComparison(file, scope, baseMode, commitId);
   return comparison?.displayPath || file?.path || "";
 }
 
 function getFileSearchPath(file) {
-  return file?.path || "";
+  return getScopeFilePath(file, state.currentScope, state.baseMode, state.activeBaseCommitId) || file?.path || "";
 }
 
 function getBaseName(path) {
@@ -194,7 +334,7 @@ function getBaseName(path) {
 }
 
 function getActiveStatus(file) {
-  const comparison = getScopeComparison(file, state.currentScope);
+  const comparison = getScopeComparison(file, state.currentScope, state.baseMode, state.activeBaseCommitId);
   return comparison?.status ?? file?.worktreeStatus ?? null;
 }
 
@@ -319,19 +459,22 @@ function buildTree(files) {
   return root;
 }
 
-function cacheKey(scope, fileId) {
-  return `${scope}:${fileId}`;
+function cacheKey(scope, fileId, baseMode = null, commitId = null) {
+  const selection = normalizeSelection(scope, baseMode, commitId);
+  return `${selection.scope}:${selection.baseMode || ""}:${selection.commitId || ""}:${fileId}`;
 }
 
-function scrollKey(scope, fileId) {
-  return `${scope}:${fileId}`;
+function scrollKey(scope, fileId, baseMode = null, commitId = null) {
+  const selection = normalizeSelection(scope, baseMode, commitId);
+  return `${selection.scope}:${selection.baseMode || ""}:${selection.commitId || ""}:${fileId}`;
 }
 
 function saveCurrentScrollPosition() {
   if (!diffEditor || !state.activeFileId) return;
+  const selection = currentSelection();
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
-  state.scrollPositions[scrollKey(state.currentScope, state.activeFileId)] = {
+  state.scrollPositions[scrollKey(selection.scope, state.activeFileId, selection.baseMode, selection.commitId)] = {
     originalTop: originalEditor.getScrollTop(),
     originalLeft: originalEditor.getScrollLeft(),
     modifiedTop: modifiedEditor.getScrollTop(),
@@ -341,7 +484,8 @@ function saveCurrentScrollPosition() {
 
 function restoreFileScrollPosition() {
   if (!diffEditor || !state.activeFileId) return;
-  const scrollState = state.scrollPositions[scrollKey(state.currentScope, state.activeFileId)];
+  const selection = currentSelection();
+  const scrollState = state.scrollPositions[scrollKey(selection.scope, state.activeFileId, selection.baseMode, selection.commitId)];
   if (!scrollState) return;
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
@@ -373,8 +517,8 @@ function restoreScrollState(scrollState) {
   modifiedEditor.setScrollLeft(scrollState.modifiedLeft);
 }
 
-function getRequestState(fileId, scope = state.currentScope) {
-  const key = cacheKey(scope, fileId);
+function getRequestState(fileId, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  const key = cacheKey(scope, fileId, baseMode, commitId);
   return {
     contents: state.fileContents[key],
     error: state.fileErrors[key],
@@ -382,9 +526,10 @@ function getRequestState(fileId, scope = state.currentScope) {
   };
 }
 
-function ensureFileLoaded(fileId, scope = state.currentScope) {
+function ensureFileLoaded(fileId, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
   if (!fileId) return;
-  const key = cacheKey(scope, fileId);
+  const selection = normalizeSelection(scope, baseMode, commitId);
+  const key = cacheKey(selection.scope, fileId, selection.baseMode, selection.commitId);
   if (state.fileContents[key] != null) return;
   if (state.fileErrors[key] != null) return;
   if (state.pendingRequestIds[key] != null) return;
@@ -393,20 +538,35 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
   state.pendingRequestIds[key] = requestId;
   renderTree();
   if (window.glimpse?.send) {
-    window.glimpse.send({ type: "request-file", requestId, fileId, scope });
+    window.glimpse.send({
+      type: "request-file",
+      requestId,
+      fileId,
+      scope: selection.scope,
+      baseMode: selection.baseMode,
+      commitId: selection.commitId,
+    });
   }
 }
 
 function openFile(fileId) {
   if (state.activeFileId === fileId) {
-    ensureFileLoaded(fileId, state.currentScope);
+    ensureFileLoaded(fileId, state.currentScope, state.baseMode, state.activeBaseCommitId);
     return;
   }
   saveCurrentScrollPosition();
   resetActiveHunkNavigation();
   state.activeFileId = fileId;
   renderAll({ restoreFileScroll: true });
-  ensureFileLoaded(fileId, state.currentScope);
+  ensureFileLoaded(fileId, state.currentScope, state.baseMode, state.activeBaseCommitId);
+}
+
+function getCurrentFileCommentCount(fileId) {
+  return state.comments.filter((comment) => comment.fileId === fileId && commentMatchesSelection(comment)).length;
+}
+
+function getCurrentFileRequestState(fileId) {
+  return getRequestState(fileId, state.currentScope, state.baseMode, state.activeBaseCommitId);
 }
 
 function renderTreeNode(node, depth) {
@@ -440,9 +600,9 @@ function renderTreeNode(node, depth) {
     }
 
     const file = child.file;
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope).length;
+    const count = getCurrentFileCommentCount(file.id);
     const reviewed = isFileReviewed(file.id);
-    const requestState = getRequestState(file.id, state.currentScope);
+    const requestState = getCurrentFileRequestState(file.id);
     const loading = requestState.requestId != null && requestState.contents == null;
     const errored = requestState.error != null;
     const status = getActiveStatus(file);
@@ -482,9 +642,9 @@ function renderSearchResults(files) {
     const path = getFileSearchPath(file);
     const baseName = getBaseName(path);
     const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope).length;
+    const count = getCurrentFileCommentCount(file.id);
     const reviewed = isFileReviewed(file.id);
-    const requestState = getRequestState(file.id, state.currentScope);
+    const requestState = getCurrentFileRequestState(file.id);
     const loading = requestState.requestId != null && requestState.contents == null;
     const errored = requestState.error != null;
     const status = getActiveStatus(file);
@@ -810,29 +970,56 @@ function handleGlobalShortcut(event) {
   shortcut.run();
 }
 
+function applySmallButtonClasses(button, active, disabled) {
+  button.disabled = disabled;
+  button.className = disabled
+    ? "cursor-default rounded-md border border-review-border bg-[#11161d] px-2.5 py-1 text-[11px] font-medium text-review-muted opacity-60"
+    : active
+      ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-[11px] font-medium text-[#3fb950] hover:bg-[#238636]/25"
+      : "cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]";
+}
+
 function updateScopeButtons() {
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
     lastCommit: reviewData.files.filter((file) => file.inLastCommit).length,
+    base: getBaseBranchScopeFiles().length,
     all: reviewData.files.filter((file) => file.hasWorkingTreeFile).length,
-  };
-
-  const applyButtonClasses = (button, active, disabled) => {
-    button.disabled = disabled;
-    button.className = disabled
-      ? "cursor-default rounded-md border border-review-border bg-[#11161d] px-2.5 py-1 text-[11px] font-medium text-review-muted opacity-60"
-      : active
-        ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-[11px] font-medium text-[#3fb950] hover:bg-[#238636]/25"
-        : "cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]";
   };
 
   scopeDiffButton.textContent = `Git diff${counts.diff > 0 ? ` (${counts.diff})` : ""}`;
   scopeLastCommitButton.textContent = `Last commit${counts.lastCommit > 0 ? ` (${counts.lastCommit})` : ""}`;
+  scopeBaseButton.textContent = `PR diff${counts.base > 0 ? ` (${counts.base})` : ""}`;
   scopeAllButton.textContent = `All files${counts.all > 0 ? ` (${counts.all})` : ""}`;
 
-  applyButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
-  applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
-  applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
+  applySmallButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
+  applySmallButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
+  applySmallButtonClasses(scopeBaseButton, state.currentScope === "base-branch", counts.base === 0);
+  applySmallButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
+}
+
+function updateBaseBranchControls() {
+  const hasBaseCommits = getBaseCommits().length > 0;
+  const showControls = state.currentScope === "base-branch" && hasBaseCommits;
+  baseBranchControlsEl.className = showControls
+    ? "mb-3 rounded-md border border-review-border bg-[#11161d] p-2.5"
+    : "mb-3 hidden rounded-md border border-review-border bg-[#11161d] p-2.5";
+
+  if (!showControls) return;
+
+  ensureBaseCommitSelection();
+  const currentCommitId = state.activeBaseCommitId || getLatestBaseCommitId();
+  const options = getBaseCommits()
+    .map((commit) => `<option value="${escapeHtml(commit.id)}" ${commit.id === currentCommitId ? "selected" : ""}>${escapeHtml(`${commit.shortId} ${commit.title}`)}</option>`)
+    .join("");
+
+  baseCommitSelectEl.innerHTML = options;
+  baseCommitSelectEl.disabled = state.baseMode === "full";
+  baseCommitLabelEl.textContent = state.baseMode === "patch" ? "Commit patch" : state.baseMode === "cumulative" ? "Cumulative target" : `Commits on ${baseBranchData?.baseRef || "base branch"}`;
+
+  applySmallButtonClasses(baseModeFullButton, state.baseMode === "full", false);
+  applySmallButtonClasses(baseModePatchButton, state.baseMode === "patch", false);
+  applySmallButtonClasses(baseModeCumulativeButton, state.baseMode === "cumulative", false);
 }
 
 function updateToggleButtons() {
@@ -846,6 +1033,7 @@ function updateToggleButtons() {
   toggleUnchangedButton.textContent = state.hideUnchanged ? "Show full file" : "Show changed areas only";
   toggleUnchangedButton.style.display = activeFileShowsDiff() ? "inline-flex" : "none";
   updateScopeButtons();
+  updateBaseBranchControls();
   modeHintEl.textContent = scopeHint(state.currentScope);
   submitButton.disabled = false;
 }
@@ -888,7 +1076,7 @@ function renderTree() {
   }
 
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
-  const comments = state.comments.length;
+  const comments = state.comments.filter((comment) => commentMatchesSelection(comment)).length;
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`;
   updateToggleButtons();
@@ -974,8 +1162,8 @@ function showFileCommentModal() {
   const file = activeFile();
   if (!file) return;
   showTextModal({
-    title: `File comment for ${getScopeDisplayPath(file, state.currentScope)}`,
-    description: `This comment applies to the whole file in ${scopeLabel(state.currentScope).toLowerCase()}.`,
+    title: `File comment for ${getScopeDisplayPath(file, state.currentScope, state.baseMode, state.activeBaseCommitId)}`,
+    description: `This comment applies to the whole file in ${getCurrentSelectionLabel().toLowerCase()}.`,
     initialValue: "",
     saveLabel: "Add comment",
     onSave: (value) => {
@@ -983,7 +1171,7 @@ function showFileCommentModal() {
       state.comments.push({
         id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
         fileId: file.id,
-        scope: state.currentScope,
+        ...getCommentContext(),
         side: "file",
         startLine: null,
         endLine: null,
@@ -1019,9 +1207,10 @@ function clearViewZones() {
 function renderCommentDOM(comment, onDelete) {
   const container = document.createElement("div");
   container.className = "view-zone-container";
+  const selectionLabel = getCurrentSelectionLabel(comment.scope, comment.baseMode || null, comment.commitId || null);
   const title = comment.side === "file"
-    ? `File comment • ${scopeLabel(comment.scope)}`
-    : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${scopeLabel(comment.scope)}`;
+    ? `File comment • ${selectionLabel}`
+    : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${selectionLabel}`;
 
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
@@ -1073,12 +1262,12 @@ function canCommentOnSide(file, side) {
 function isActiveFileReady() {
   const file = activeFile();
   if (!file) return false;
-  const requestState = getRequestState(file.id, state.currentScope);
+  const requestState = getRequestState(file.id, state.currentScope, state.baseMode, state.activeBaseCommitId);
   return requestState.contents != null && requestState.error == null;
 }
 
 function scopeSupportsHunkNavigation(scope = state.currentScope) {
-  return scope === "git-diff" || scope === "last-commit";
+  return scope === "git-diff" || scope === "last-commit" || scope === "base-branch";
 }
 
 function clearActiveHunkHighlight() {
@@ -1297,7 +1486,7 @@ function openInlineCommentDraft(side, line) {
   state.comments.push({
     id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
     fileId: file.id,
-    scope: state.currentScope,
+    ...getCommentContext(),
     side,
     startLine: line,
     endLine: line,
@@ -1336,7 +1525,7 @@ function syncViewZones() {
 
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
-  const inlineComments = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side !== "file");
+  const inlineComments = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesSelection(comment) && comment.side !== "file");
 
   inlineComments.forEach((item) => {
     const editor = item.side === "original" ? originalEditor : modifiedEditor;
@@ -1360,7 +1549,7 @@ function syncViewZones() {
 function updateDecorations() {
   if (!diffEditor || !monacoApi) return;
   const file = activeFile();
-  const comments = file ? state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side !== "file") : [];
+  const comments = file ? state.comments.filter((comment) => comment.fileId === file.id && commentMatchesSelection(comment) && comment.side !== "file") : [];
   const originalRanges = [];
   const modifiedRanges = [];
 
@@ -1389,7 +1578,7 @@ function renderFileComments() {
     return;
   }
 
-  const fileComments = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side === "file");
+  const fileComments = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesSelection(comment) && comment.side === "file");
 
   if (fileComments.length === 0) {
     fileCommentsContainer.className = "hidden overflow-hidden px-0 py-0";
@@ -1407,9 +1596,9 @@ function renderFileComments() {
   });
 }
 
-function getPlaceholderContents(file, scope) {
-  const path = getScopeDisplayPath(file, scope);
-  const requestState = getRequestState(file.id, scope);
+function getPlaceholderContents(file, scope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  const path = getScopeDisplayPath(file, scope, baseMode, commitId);
+  const requestState = getRequestState(file.id, scope, baseMode, commitId);
   if (requestState.error) {
     const body = `Failed to load ${path}\n\n${requestState.error}`;
     return { originalContent: body, modifiedContent: body };
@@ -1418,8 +1607,8 @@ function getPlaceholderContents(file, scope) {
   return { originalContent: body, modifiedContent: body };
 }
 
-function getMountedContents(file, scope = state.currentScope) {
-  return getRequestState(file.id, scope).contents || getPlaceholderContents(file, scope);
+function getMountedContents(file, scope = state.currentScope, baseMode = state.baseMode, commitId = state.activeBaseCommitId) {
+  return getRequestState(file.id, scope, baseMode, commitId).contents || getPlaceholderContents(file, scope, baseMode, commitId);
 }
 
 function mountFile(options = {}) {
@@ -1441,15 +1630,15 @@ function mountFile(options = {}) {
     return;
   }
 
-  ensureFileLoaded(file.id, state.currentScope);
+  ensureFileLoaded(file.id, state.currentScope, state.baseMode, state.activeBaseCommitId);
 
   const preserveScroll = options.preserveScroll === true;
   const scrollState = preserveScroll ? captureScrollState() : null;
-  const language = inferLanguage(getScopeFilePath(file) || file.path);
-  const contents = getMountedContents(file, state.currentScope);
+  const language = inferLanguage(getScopeFilePath(file, state.currentScope, state.baseMode, state.activeBaseCommitId) || file.path);
+  const contents = getMountedContents(file, state.currentScope, state.baseMode, state.activeBaseCommitId);
 
   clearViewZones();
-  currentFileLabelEl.textContent = getScopeDisplayPath(file, state.currentScope);
+  currentFileLabelEl.textContent = getScopeDisplayPath(file, state.currentScope, state.baseMode, state.activeBaseCommitId);
 
   if (originalModel) originalModel.dispose();
   if (modifiedModel) modifiedModel.dispose();
@@ -1550,7 +1739,8 @@ function createGlyphHoverActions(editor, side) {
 
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
-  const key = cacheKey(message.scope, message.fileId);
+  const messageSelection = normalizeSelection(message.scope, message.baseMode || null, message.commitId || null);
+  const key = cacheKey(messageSelection.scope, message.fileId, messageSelection.baseMode, messageSelection.commitId);
 
   if (message.type === "file-data") {
     state.fileContents[key] = {
@@ -1560,7 +1750,7 @@ window.__reviewReceive = function (message) {
     delete state.fileErrors[key];
     delete state.pendingRequestIds[key];
     renderTree();
-    if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+    if (state.activeFileId === message.fileId && selectionsMatch(currentSelection(), messageSelection)) {
       resetActiveHunkNavigation();
       mountFile({ restoreFileScroll: true });
     }
@@ -1571,7 +1761,7 @@ window.__reviewReceive = function (message) {
     state.fileErrors[key] = message.message || "Unknown error";
     delete state.pendingRequestIds[key];
     renderTree();
-    if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+    if (state.activeFileId === message.fileId && selectionsMatch(currentSelection(), messageSelection)) {
       resetActiveHunkNavigation();
       mountFile({ preserveScroll: false });
     }
@@ -1637,19 +1827,47 @@ function setupMonaco() {
   });
 }
 
+function applyBaseSelectionChange() {
+  saveCurrentScrollPosition();
+  resetActiveHunkNavigation();
+  renderAll({ restoreFileScroll: true });
+  const file = activeFile();
+  if (file) ensureFileLoaded(file.id, state.currentScope, state.baseMode, state.activeBaseCommitId);
+}
+
 function switchScope(scope) {
   const hasScopeFiles = {
     "git-diff": reviewData.files.some((file) => file.inGitDiff),
     "last-commit": reviewData.files.some((file) => file.inLastCommit),
+    "base-branch": getBaseBranchScopeFiles().length > 0,
     "all-files": reviewData.files.some((file) => file.hasWorkingTreeFile),
   };
   if (!hasScopeFiles[scope] || state.currentScope === scope) return;
+  ensureBaseCommitSelection();
   saveCurrentScrollPosition();
   resetActiveHunkNavigation();
   state.currentScope = scope;
   renderAll({ restoreFileScroll: true });
   const file = activeFile();
-  if (file) ensureFileLoaded(file.id, state.currentScope);
+  if (file) ensureFileLoaded(file.id, state.currentScope, state.baseMode, state.activeBaseCommitId);
+}
+
+function switchBaseMode(baseMode) {
+  ensureBaseCommitSelection();
+  if (state.baseMode === baseMode) return;
+  state.baseMode = baseMode;
+  applyBaseSelectionChange();
+}
+
+function switchBaseCommit(commitId) {
+  ensureBaseCommitSelection();
+  if (!commitId || state.activeBaseCommitId === commitId) return;
+  state.activeBaseCommitId = commitId;
+  if (state.currentScope === "base-branch" && state.baseMode !== "full") {
+    applyBaseSelectionChange();
+    return;
+  }
+  updateBaseBranchControls();
 }
 
 submitButton.addEventListener("click", () => {
@@ -1709,8 +1927,28 @@ scopeLastCommitButton.addEventListener("click", () => {
   switchScope("last-commit");
 });
 
+scopeBaseButton.addEventListener("click", () => {
+  switchScope("base-branch");
+});
+
 scopeAllButton.addEventListener("click", () => {
   switchScope("all-files");
+});
+
+baseModeFullButton.addEventListener("click", () => {
+  switchBaseMode("full");
+});
+
+baseModePatchButton.addEventListener("click", () => {
+  switchBaseMode("patch");
+});
+
+baseModeCumulativeButton.addEventListener("click", () => {
+  switchBaseMode("cumulative");
+});
+
+baseCommitSelectEl.addEventListener("change", () => {
+  switchBaseCommit(baseCommitSelectEl.value);
 });
 
 toggleSidebarButton.addEventListener("click", () => {
