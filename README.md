@@ -27,15 +27,9 @@ The command:
 
 ## Base branch selection
 
-`/diff-review` computes PR/base-branch scopes against a base ref.
+`/diff-review` computes PR/base-branch scopes against an auto-detected base ref.
 
-- Auto-detection fallback order: `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`
-- Explicit override (preferred when your repo uses a different integration branch):
-  - `/diff-review --base develop`
-  - `/diff-review --base-ref release/1.2`
-  - `/diff-review develop` (single positional ref)
-
-If you provide an explicit base ref and it cannot be resolved (or has no merge base with `HEAD`), the command fails with an error instead of silently falling back.
+Fallback order: `origin/HEAD`, `origin/main`, `origin/master`, `main`, `master`
 
 ## Requirements
 

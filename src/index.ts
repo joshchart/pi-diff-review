@@ -32,76 +32,6 @@ function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 }
 
-function stripWrappingQuotes(value: string): string {
-  if (value.length < 2) return value;
-  const first = value[0];
-  const last = value[value.length - 1];
-  if ((first === '"' || first === "'") && first === last) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function tokenizeArgs(args: string): string[] {
-  return args.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-}
-
-function parseBaseRefArg(args: string): string | null {
-  const tokens = tokenizeArgs(args).map(stripWrappingQuotes);
-  let flaggedBaseRef: string | null = null;
-  let positionalBaseRef: string | null = null;
-
-  const setFlaggedBaseRef = (value: string): void => {
-    const normalized = stripWrappingQuotes(value);
-    if (normalized.length === 0) {
-      throw new Error("Expected a base ref value.");
-    }
-    if (flaggedBaseRef != null && flaggedBaseRef !== normalized) {
-      throw new Error(`Conflicting base refs: ${flaggedBaseRef} and ${normalized}.`);
-    }
-    flaggedBaseRef = normalized;
-  };
-
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index] ?? "";
-
-    if (token === "--base" || token === "--base-ref") {
-      const value = tokens[index + 1] ?? "";
-      if (value.length === 0) {
-        throw new Error(`Expected a value after ${token}.`);
-      }
-      setFlaggedBaseRef(value);
-      index += 1;
-      continue;
-    }
-
-    if (token.startsWith("--base=")) {
-      setFlaggedBaseRef(token.slice("--base=".length));
-      continue;
-    }
-
-    if (token.startsWith("--base-ref=")) {
-      setFlaggedBaseRef(token.slice("--base-ref=".length));
-      continue;
-    }
-
-    if (token.startsWith("-")) {
-      throw new Error(`Unknown argument: ${token}`);
-    }
-
-    if (positionalBaseRef != null && positionalBaseRef !== token) {
-      throw new Error(`Expected at most one positional base ref, received: ${positionalBaseRef} and ${token}.`);
-    }
-    positionalBaseRef = token;
-  }
-
-  if (flaggedBaseRef != null && positionalBaseRef != null && flaggedBaseRef !== positionalBaseRef) {
-    throw new Error(`Conflicting base refs: ${flaggedBaseRef} and ${positionalBaseRef}.`);
-  }
-
-  return flaggedBaseRef ?? positionalBaseRef;
-}
-
 export default function (pi: ExtensionAPI) {
   let activeWindow: GlimpseWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
@@ -181,13 +111,13 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewRepository(ctx: ExtensionCommandContext, baseRefOverride: string | null): Promise<void> {
+  async function reviewRepository(ctx: ExtensionCommandContext): Promise<void> {
     if (activeWindow != null) {
       ctx.ui.notify("A review window is already open.", "warning");
       return;
     }
 
-    const reviewData = await getReviewWindowData(pi, ctx.cwd, { baseRef: baseRefOverride });
+    const reviewData = await getReviewWindowData(pi, ctx.cwd);
     const { repoRoot, files, baseBranch } = reviewData;
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
@@ -353,9 +283,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("diff-review", {
     description: "Open a native review window with git diff, last commit, PR diff, and all files scopes",
-    handler: async (args, ctx) => {
-      const baseRef = parseBaseRefArg(args);
-      await reviewRepository(ctx, baseRef);
+    handler: async (_args, ctx) => {
+      await reviewRepository(ctx);
     },
   });
 
